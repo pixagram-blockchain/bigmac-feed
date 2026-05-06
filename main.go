@@ -268,8 +268,8 @@ func main() {
 	witness := flag.String("witness", "initminer", "Witness account name")
 	wif := flag.String("wif", "", "Witness active key (WIF). Also reads WITNESS_WIF env.")
 	rpc := flag.String("rpc", "https://pixagram.dev", "RPC endpoint")
-	chainID := flag.String("chain-id", "18dcf0a285365fc58b71f18b3d3fec954aa0c141c44e4e5cb4cf777b9eab274e", "Chain ID (hex)")
-	tokenPrice := flag.Float64("token-price", 0.06, "Price of 1 TESTS in USD")
+	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
+	tokenPrice := flag.Float64("token-price", 0.06, "Price of 1 PIXA in USD")
 	interval := flag.Duration("interval", 1*time.Hour, "Feed publish interval")
 	once := flag.Bool("once", false, "Publish once and exit")
 	flag.Parse()
@@ -286,6 +286,21 @@ func main() {
 		log.Fatalf("bad WIF key: %v", err)
 	}
 
+	if *chainID == "" {
+		cfg, err := rpcCall(*rpc, "database_api.get_config", map[string]interface{}{})
+		if err != nil {
+			log.Fatalf("fetch chain_id: %v", err)
+		}
+		var parsed struct {
+			HiveChainID string `json:"HIVE_CHAIN_ID"`
+		}
+		if err := json.Unmarshal(cfg, &parsed); err != nil || parsed.HiveChainID == "" {
+			log.Fatalf("fetch chain_id: could not parse HIVE_CHAIN_ID from get_config")
+		}
+		*chainID = parsed.HiveChainID
+		log.Printf("Auto-detected chain_id: %s", *chainID)
+	}
+
 	log.Printf("Big Mac Feed — witness=%s rpc=%s token=$%.4f interval=%s",
 		*witness, *rpc, *tokenPrice, *interval)
 
@@ -295,18 +310,18 @@ func main() {
 			return fmt.Errorf("fetch price: %w", err)
 		}
 
-		// 1 TBD = 1 Big Mac
-		// How many TESTS to buy 1 Big Mac?
-		testsPerBigMac := bigMacUSD / *tokenPrice
+		// 1 PXS = 1 Big Mac
+		// How many PIXA to buy 1 Big Mac?
+		pixaPerBigMac := bigMacUSD / *tokenPrice
 
-		base := asset{Amount: 1000, Precision: 3, Symbol: "TBD"}
+		base := asset{Amount: 1000, Precision: 3, Symbol: "PXS"}
 		quote := asset{
-			Amount:    int64(math.Round(testsPerBigMac * 1000)),
+			Amount:    int64(math.Round(pixaPerBigMac * 1000)),
 			Precision: 3,
-			Symbol:    "TESTS",
+			Symbol:    "PIXA",
 		}
 
-		log.Printf("Big Mac = $%.2f (as of %s) → 1 TBD = %s",
+		log.Printf("Big Mac = $%.2f (as of %s) → 1 PXS = %s",
 			bigMacUSD, asOf, quote.String())
 
 		props, err := rpcCall(*rpc, "condenser_api.get_dynamic_global_properties", []interface{}{})
@@ -337,7 +352,7 @@ func main() {
 			return fmt.Errorf("broadcast: %w", err)
 		}
 
-		log.Printf("Feed published: 1.000 TBD = %s", quote.String())
+		log.Printf("Feed published: 1.000 PXS = %s", quote.String())
 		return nil
 	}
 
