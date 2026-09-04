@@ -356,7 +356,7 @@ func main() {
 	wif := flag.String("wif", "", "Witness active key(s) (WIF), comma-separated in the same order as --witness. Also reads WITNESS_WIF env.")
 	rpc := flag.String("rpc", "https://pixagram.dev", "RPC endpoint")
 	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
-	tokenPrice := flag.Float64("token-price", 0.06, "Price of 1 PIXA in USD")
+	tokenPrice := flag.Float64("token-price", 0.12, "Price of 1 PIXA in USD")
 	interval := flag.Duration("interval", 1*time.Hour, "Feed publish interval")
 	once := flag.Bool("once", false, "Publish once and exit")
 	flag.Parse()
