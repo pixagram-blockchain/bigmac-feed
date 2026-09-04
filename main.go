@@ -7,6 +7,7 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -126,6 +128,43 @@ func decodeWIF(wif string) (*btcec.PrivateKey, error) {
 	}
 	key, _ := btcec.PrivKeyFromBytes(keyBytes)
 	return key, nil
+}
+
+// --- Witness config ---
+
+type witnessKey struct {
+	name string
+	key  *btcec.PrivateKey
+}
+
+// parseWitnesses pairs comma-separated witness names with comma-separated
+// WIF keys by position.
+func parseWitnesses(names, wifs string) ([]witnessKey, error) {
+	nameList := splitList(names)
+	wifList := splitList(wifs)
+	if len(nameList) != len(wifList) {
+		return nil, fmt.Errorf("%d witness names but %d WIF keys", len(nameList), len(wifList))
+	}
+	witnesses := make([]witnessKey, len(nameList))
+	for i, name := range nameList {
+		if name == "" {
+			return nil, fmt.Errorf("witness #%d: empty name", i+1)
+		}
+		key, err := decodeWIF(wifList[i])
+		if err != nil {
+			return nil, fmt.Errorf("witness %s: bad WIF key: %w", name, err)
+		}
+		witnesses[i] = witnessKey{name: name, key: key}
+	}
+	return witnesses, nil
+}
+
+func splitList(s string) []string {
+	parts := strings.Split(s, ",")
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
 }
 
 // --- Transaction building & signing ---
@@ -262,11 +301,59 @@ func fetchBigMacPrice() (float64, string, error) {
 	return bestPrice, bestDate, nil
 }
 
+// --- Publishing ---
+
+// publishFeed builds, signs and broadcasts one feed_publish transaction for w.
+func publishFeed(rpc, chainID string, w witnessKey, base, quote asset) error {
+	props, err := rpcCall(rpc, "condenser_api.get_dynamic_global_properties", []interface{}{})
+	if err != nil {
+		return fmt.Errorf("get props: %w", err)
+	}
+	var dgp dynamicGlobalProps
+	json.Unmarshal(props, &dgp)
+
+	txBytes, txJSON, err := buildTransaction(w.name, base, quote, &dgp)
+	if err != nil {
+		return fmt.Errorf("build tx: %w", err)
+	}
+
+	sig, err := signTransaction(chainID, txBytes, w.key)
+	if err != nil {
+		return fmt.Errorf("sign: %w", err)
+	}
+
+	// Sync JSON expiration with potentially adjusted txBytes
+	expOffset := 2 + 4
+	exp := binary.LittleEndian.Uint32(txBytes[expOffset : expOffset+4])
+	txJSON["expiration"] = time.Unix(int64(exp), 0).UTC().Format("2006-01-02T15:04:05")
+	txJSON["signatures"] = []string{sig}
+
+	_, err = rpcCall(rpc, "condenser_api.broadcast_transaction_synchronous", []interface{}{txJSON})
+	if err != nil {
+		return fmt.Errorf("broadcast: %w", err)
+	}
+	return nil
+}
+
+// publishAll publishes the feed for every witness, one transaction each, so a
+// failure for one witness does not block the others.
+func publishAll(rpc, chainID string, witnesses []witnessKey, base, quote asset) error {
+	var errs []error
+	for _, w := range witnesses {
+		if err := publishFeed(rpc, chainID, w, base, quote); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", w.name, err))
+			continue
+		}
+		log.Printf("Feed published by %s: 1.000 PXS = %s", w.name, quote.String())
+	}
+	return errors.Join(errs...)
+}
+
 // --- Main ---
 
 func main() {
-	witness := flag.String("witness", "initminer", "Witness account name")
-	wif := flag.String("wif", "", "Witness active key (WIF). Also reads WITNESS_WIF env.")
+	witness := flag.String("witness", "initminer", "Witness account name(s), comma-separated")
+	wif := flag.String("wif", "", "Witness active key(s) (WIF), comma-separated in the same order as --witness. Also reads WITNESS_WIF env.")
 	rpc := flag.String("rpc", "https://pixagram.dev", "RPC endpoint")
 	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
 	tokenPrice := flag.Float64("token-price", 0.06, "Price of 1 PIXA in USD")
@@ -281,9 +368,9 @@ func main() {
 		log.Fatal("provide --wif or set WITNESS_WIF env")
 	}
 
-	privKey, err := decodeWIF(*wif)
+	witnesses, err := parseWitnesses(*witness, *wif)
 	if err != nil {
-		log.Fatalf("bad WIF key: %v", err)
+		log.Fatal(err)
 	}
 
 	if *chainID == "" {
@@ -301,7 +388,7 @@ func main() {
 		log.Printf("Auto-detected chain_id: %s", *chainID)
 	}
 
-	log.Printf("Big Mac Feed — witness=%s rpc=%s token=$%.4f interval=%s",
+	log.Printf("Big Mac Feed — witnesses=%s rpc=%s token=$%.4f interval=%s",
 		*witness, *rpc, *tokenPrice, *interval)
 
 	publish := func() error {
@@ -324,36 +411,7 @@ func main() {
 		log.Printf("Big Mac = $%.2f (as of %s) → 1 PXS = %s",
 			bigMacUSD, asOf, quote.String())
 
-		props, err := rpcCall(*rpc, "condenser_api.get_dynamic_global_properties", []interface{}{})
-		if err != nil {
-			return fmt.Errorf("get props: %w", err)
-		}
-		var dgp dynamicGlobalProps
-		json.Unmarshal(props, &dgp)
-
-		txBytes, txJSON, err := buildTransaction(*witness, base, quote, &dgp)
-		if err != nil {
-			return fmt.Errorf("build tx: %w", err)
-		}
-
-		sig, err := signTransaction(*chainID, txBytes, privKey)
-		if err != nil {
-			return fmt.Errorf("sign: %w", err)
-		}
-
-		// Sync JSON expiration with potentially adjusted txBytes
-		expOffset := 2 + 4
-		exp := binary.LittleEndian.Uint32(txBytes[expOffset : expOffset+4])
-		txJSON["expiration"] = time.Unix(int64(exp), 0).UTC().Format("2006-01-02T15:04:05")
-		txJSON["signatures"] = []string{sig}
-
-		_, err = rpcCall(*rpc, "condenser_api.broadcast_transaction_synchronous", []interface{}{txJSON})
-		if err != nil {
-			return fmt.Errorf("broadcast: %w", err)
-		}
-
-		log.Printf("Feed published: 1.000 PXS = %s", quote.String())
-		return nil
+		return publishAll(*rpc, *chainID, witnesses, base, quote)
 	}
 
 	if err := publish(); err != nil {
