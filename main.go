@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	bigMacURL     = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jan-26.csv"
+	bigMacURL     = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jul-26.csv"
 	opFeedPublish = 7
 )
 
