@@ -354,7 +354,7 @@ func publishAll(rpc, chainID string, witnesses []witnessKey, base, quote asset) 
 func main() {
 	witness := flag.String("witness", "initminer", "Witness account name(s), comma-separated")
 	wif := flag.String("wif", "", "Witness active key(s) (WIF), comma-separated in the same order as --witness. Also reads WITNESS_WIF env.")
-	rpc := flag.String("rpc", "https://pixagram.dev", "RPC endpoint")
+	rpc := flag.String("rpc", "https://api.pixagram.com", "RPC endpoint")
 	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
 	tokenPrice := flag.Float64("token-price", 0.12, "Price of 1 PIXA in USD")
 	interval := flag.Duration("interval", 1*time.Hour, "Feed publish interval")
