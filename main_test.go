@@ -188,3 +188,67 @@ func TestPublishAllContinuesAfterOneWitnessFails(t *testing.T) {
 		t.Errorf("broadcast publishers = %v, want %v (bob must still publish)", chain.publishers, want)
 	}
 }
+
+// coinstoreServer serves body as the Coinstore ticker/price response.
+func coinstoreServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestFetchCoinstorePricePicksSymbolFromFullList(t *testing.T) {
+	srv := coinstoreServer(t, `{"data":[{"id":4,"symbol":"BTCUSDT","price":"82151.1"},{"id":1972,"symbol":"PIXAUSDT","price":"0.0042"}],"code":0}`)
+
+	got, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
+	if err != nil {
+		t.Fatalf("fetchCoinstorePrice: %v", err)
+	}
+	if got != 0.0042 {
+		t.Errorf("price = %v, want 0.0042", got)
+	}
+}
+
+func TestFetchCoinstorePriceRejectsUnlistedSymbol(t *testing.T) {
+	srv := coinstoreServer(t, `{"data":[{"id":4,"symbol":"BTCUSDT","price":"82151.1"}],"code":0}`)
+
+	_, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
+	if err == nil || !strings.Contains(err.Error(), "PIXAUSDT") {
+		t.Fatalf("expected error naming PIXAUSDT, got %v", err)
+	}
+}
+
+func TestFetchCoinstorePriceReportsAPIError(t *testing.T) {
+	srv := coinstoreServer(t, `{"code":401,"message":"Unauthorized"}`)
+
+	_, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
+	if err == nil || !strings.Contains(err.Error(), "Unauthorized") {
+		t.Fatalf("expected Coinstore error, got %v", err)
+	}
+}
+
+func TestTokenPriceUSDUsesLiveCoinstorePrice(t *testing.T) {
+	srv := coinstoreServer(t, `{"data":[{"id":1972,"symbol":"PIXAUSDT","price":"0.0042"}],"code":0}`)
+
+	got, _, err := tokenPriceUSD(srv.URL, 0.12)
+	if err != nil {
+		t.Fatalf("tokenPriceUSD: %v", err)
+	}
+	if got != 0.0042 {
+		t.Errorf("price = %v, want live 0.0042", got)
+	}
+}
+
+func TestTokenPriceUSDFallsBackWhenPairHasNotTraded(t *testing.T) {
+	srv := coinstoreServer(t, `{"data":[{"id":1972,"symbol":"PIXAUSDT","price":"0"}],"code":0}`)
+
+	got, _, err := tokenPriceUSD(srv.URL, 0.12)
+	if err != nil {
+		t.Fatalf("tokenPriceUSD: %v", err)
+	}
+	if got != 0.12 {
+		t.Errorf("price = %v, want fallback 0.12", got)
+	}
+}

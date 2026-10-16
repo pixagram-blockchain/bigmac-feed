@@ -25,8 +25,10 @@ import (
 )
 
 const (
-	bigMacURL     = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jul-26.csv"
-	opFeedPublish = 7
+	bigMacURL         = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jul-26.csv"
+	coinstorePriceURL = "https://api.coinstore.com/api/v1/ticker/price"
+	coinstoreSymbol   = "PIXAUSDT"
+	opFeedPublish     = 7
 )
 
 // --- RPC ---
@@ -301,6 +303,61 @@ func fetchBigMacPrice() (float64, string, error) {
 	return bestPrice, bestDate, nil
 }
 
+// --- PIXA price ---
+
+// fetchCoinstorePrice returns the last trade price of symbol from Coinstore's
+// public ticker/price endpoint, or 0 if the pair has not traded yet. The
+// endpoint ignores its symbol filter and lists every pair, so pick ours out.
+func fetchCoinstorePrice(priceURL, symbol string) (float64, error) {
+	resp, err := http.Get(priceURL + "?symbol=" + symbol)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("coinstore: HTTP %s", resp.Status)
+	}
+
+	var r struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    []struct {
+			Symbol string `json:"symbol"`
+			Price  string `json:"price"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return 0, fmt.Errorf("coinstore: %w", err)
+	}
+	if r.Code != 0 {
+		return 0, fmt.Errorf("coinstore error %d: %s", r.Code, r.Message)
+	}
+	for _, t := range r.Data {
+		if t.Symbol != symbol {
+			continue
+		}
+		p, err := strconv.ParseFloat(t.Price, 64)
+		if err != nil || math.IsNaN(p) || math.IsInf(p, 0) || p < 0 {
+			return 0, fmt.Errorf("coinstore: bad %s price %q", symbol, t.Price)
+		}
+		return p, nil
+	}
+	return 0, fmt.Errorf("coinstore: %s not listed", symbol)
+}
+
+// tokenPriceUSD returns the live PIXA price from Coinstore, or fallback while
+// the pair has no trades yet. The second result describes the price source.
+func tokenPriceUSD(priceURL string, fallback float64) (float64, string, error) {
+	price, err := fetchCoinstorePrice(priceURL, coinstoreSymbol)
+	if err != nil {
+		return 0, "", err
+	}
+	if price == 0 {
+		return fallback, "fallback, no Coinstore trades yet", nil
+	}
+	return price, "Coinstore " + coinstoreSymbol, nil
+}
+
 // --- Publishing ---
 
 // publishFeed builds, signs and broadcasts one feed_publish transaction for w.
@@ -356,7 +413,7 @@ func main() {
 	wif := flag.String("wif", "", "Witness active key(s) (WIF), comma-separated in the same order as --witness. Also reads WITNESS_WIF env.")
 	rpc := flag.String("rpc", "https://api.pixagram.com", "RPC endpoint")
 	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
-	tokenPrice := flag.Float64("token-price", 0.12, "Price of 1 PIXA in USD")
+	tokenPrice := flag.Float64("token-price", 0.12, "Fallback price of 1 PIXA in USD, used while "+coinstoreSymbol+" on Coinstore has no trades")
 	interval := flag.Duration("interval", 1*time.Hour, "Feed publish interval")
 	once := flag.Bool("once", false, "Publish once and exit")
 	flag.Parse()
@@ -388,7 +445,7 @@ func main() {
 		log.Printf("Auto-detected chain_id: %s", *chainID)
 	}
 
-	log.Printf("Big Mac Feed — witnesses=%s rpc=%s token=$%.4f interval=%s",
+	log.Printf("Big Mac Feed — witnesses=%s rpc=%s fallback-token=$%.4f interval=%s",
 		*witness, *rpc, *tokenPrice, *interval)
 
 	publish := func() error {
@@ -396,10 +453,14 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("fetch price: %w", err)
 		}
+		pixaUSD, pixaSource, err := tokenPriceUSD(coinstorePriceURL, *tokenPrice)
+		if err != nil {
+			return fmt.Errorf("fetch PIXA price: %w", err)
+		}
 
 		// 1 PXS = 1 Big Mac
 		// How many PIXA to buy 1 Big Mac?
-		pixaPerBigMac := bigMacUSD / *tokenPrice
+		pixaPerBigMac := bigMacUSD / pixaUSD
 
 		base := asset{Amount: 1000, Precision: 3, Symbol: "PXS"}
 		quote := asset{
@@ -408,8 +469,8 @@ func main() {
 			Symbol:    "PIXA",
 		}
 
-		log.Printf("Big Mac = $%.2f (as of %s) → 1 PXS = %s",
-			bigMacUSD, asOf, quote.String())
+		log.Printf("Big Mac = $%.2f (as of %s), PIXA = $%g (%s) → 1 PXS = %s",
+			bigMacUSD, asOf, pixaUSD, pixaSource, quote.String())
 
 		return publishAll(*rpc, *chainID, witnesses, base, quote)
 	}
