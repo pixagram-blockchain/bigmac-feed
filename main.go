@@ -47,6 +47,10 @@ var euroArea = map[string]bool{
 	"SVN": true,
 }
 
+// httpClient is used for every network call, so a hung connection fails the
+// round instead of stalling the feeder forever.
+var httpClient = &http.Client{Timeout: 60 * time.Second}
+
 // --- RPC ---
 
 type rpcRequest struct {
@@ -66,7 +70,7 @@ type rpcResponse struct {
 
 func rpcCall(endpoint, method string, params interface{}) (json.RawMessage, error) {
 	body, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", Method: method, Params: params, ID: 1})
-	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post(endpoint, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +290,7 @@ func indexCountry(code string) (string, error) {
 // detectCountry geolocates this machine's public IP and returns its Big Mac
 // index country code.
 func detectCountry(geoURL string) (string, error) {
-	resp, err := http.Get(geoURL)
+	resp, err := httpClient.Get(geoURL)
 	if err != nil {
 		return "", err
 	}
@@ -317,7 +321,7 @@ type bigMacPrice struct {
 // fetchBigMacPrices returns the Big Mac prices from the latest survey in the
 // index, keyed by country code. Countries dropped from the survey are left out.
 func fetchBigMacPrices(csvURL string) (map[string]bigMacPrice, error) {
-	resp, err := http.Get(csvURL)
+	resp, err := httpClient.Get(csvURL)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +399,7 @@ func pickBigMacPrice(prices map[string]bigMacPrice, country string, fallbackToUS
 // public ticker/price endpoint, or 0 if the pair has not traded yet. The
 // endpoint ignores its symbol filter and lists every pair, so pick ours out.
 func fetchCoinstorePrice(priceURL, symbol string) (float64, error) {
-	resp, err := http.Get(priceURL + "?symbol=" + symbol)
+	resp, err := httpClient.Get(priceURL + "?symbol=" + symbol)
 	if err != nil {
 		return 0, err
 	}

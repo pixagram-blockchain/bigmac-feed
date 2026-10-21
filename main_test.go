@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/mr-tron/base58"
@@ -361,5 +362,38 @@ func TestPickBigMacPriceRejectsMissingCountryFromFlag(t *testing.T) {
 	got, err := pickBigMacPrice(testPrices, "RUS", false)
 	if err == nil || !strings.Contains(err.Error(), "RUS") {
 		t.Fatalf("pickBigMacPrice = %+v, %v; want error naming RUS", got, err)
+	}
+}
+
+func TestNetworkCallsTimeOut(t *testing.T) {
+	// The server never answers; each call must give up instead of hanging.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release) // runs before srv.Close, which waits for handlers
+
+	old := httpClient.Timeout
+	httpClient.Timeout = 50 * time.Millisecond
+	defer func() { httpClient.Timeout = old }()
+
+	calls := map[string]func() error{
+		"rpcCall":             func() error { _, err := rpcCall(srv.URL, "condenser_api.get_config", []interface{}{}); return err },
+		"detectCountry":       func() error { _, err := detectCountry(srv.URL); return err },
+		"fetchBigMacPrices":   func() error { _, err := fetchBigMacPrices(srv.URL); return err },
+		"fetchCoinstorePrice": func() error { _, err := fetchCoinstorePrice(srv.URL, coinstoreSymbol); return err },
+	}
+	for name, call := range calls {
+		done := make(chan error, 1)
+		go func() { done <- call() }()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("%s: expected timeout error, got nil", name)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s: still hanging after 5s", name)
+		}
 	}
 }

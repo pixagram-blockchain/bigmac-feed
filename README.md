@@ -14,6 +14,8 @@ Then every hour it:
 2. reads the PIXA price in USD from Coinstore (`PIXAUSDT`, last trade);
 3. publishes `1.000 PXS = <Big Mac price / PIXA price> PIXA` for each witness.
 
+Every network request times out after 60 s. A failed round is logged and retried at the next interval.
+
 ## Run
 
 ```bash
