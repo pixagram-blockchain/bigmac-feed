@@ -22,14 +22,30 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/mr-tron/base58"
+	"golang.org/x/text/language"
 )
 
 const (
 	bigMacURL         = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jul-26.csv"
 	coinstorePriceURL = "https://api.coinstore.com/api/v1/ticker/price"
 	coinstoreSymbol   = "PIXAUSDT"
+	geoURL            = "https://ipinfo.io/json"
 	opFeedPublish     = 7
+
+	// Big Mac index country codes (iso_a3, plus EUZ for the euro area).
+	usCode       = "USA"
+	euroAreaCode = "EUZ"
 )
+
+// euroArea lists the euro area members by ISO 3166 alpha-3 code. The Big Mac
+// index has no rows for them, only one "Euro area" row.
+var euroArea = map[string]bool{
+	"AUT": true, "BEL": true, "BGR": true, "CYP": true, "DEU": true,
+	"ESP": true, "EST": true, "FIN": true, "FRA": true, "GRC": true,
+	"HRV": true, "IRL": true, "ITA": true, "LTU": true, "LUX": true,
+	"LVA": true, "MLT": true, "NLD": true, "PRT": true, "SVK": true,
+	"SVN": true,
+}
 
 // --- RPC ---
 
@@ -247,33 +263,84 @@ func signTransaction(chainID string, txBytes []byte, key *btcec.PrivateKey) (str
 	return "", fmt.Errorf("could not produce canonical signature after 20 attempts")
 }
 
+// --- Location ---
+
+// indexCountry converts an ISO 3166 alpha-2 or alpha-3 country code to the
+// code the Big Mac index uses for it, mapping euro area members to EUZ.
+func indexCountry(code string) (string, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == euroAreaCode {
+		return code, nil
+	}
+	region, err := language.ParseRegion(code)
+	if err != nil || !region.IsCountry() {
+		return "", fmt.Errorf("unknown country code %q", code)
+	}
+	iso3 := region.ISO3()
+	if euroArea[iso3] {
+		return euroAreaCode, nil
+	}
+	return iso3, nil
+}
+
+// detectCountry geolocates this machine's public IP and returns its Big Mac
+// index country code.
+func detectCountry(geoURL string) (string, error) {
+	resp, err := http.Get(geoURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("geolocation: HTTP %s", resp.Status)
+	}
+	var r struct {
+		Country string `json:"country"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return "", fmt.Errorf("geolocation: %w", err)
+	}
+	if r.Country == "" {
+		return "", fmt.Errorf("geolocation: no country in response")
+	}
+	return indexCountry(r.Country)
+}
+
 // --- Big Mac price ---
 
-func fetchBigMacPrice() (float64, string, error) {
-	resp, err := http.Get(bigMacURL)
+type bigMacPrice struct {
+	Name string  // country name as in the index, e.g. "Euro area"
+	USD  float64 // local price converted to USD at the survey's exchange rate
+	Date string  // survey date
+}
+
+// fetchBigMacPrices returns the Big Mac prices from the latest survey in the
+// index, keyed by country code. Countries dropped from the survey are left out.
+func fetchBigMacPrices(csvURL string) (map[string]bigMacPrice, error) {
+	resp, err := http.Get(csvURL)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	reader := csv.NewReader(resp.Body)
 	header, err := reader.Read()
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 
 	col := make(map[string]int)
 	for i, h := range header {
 		col[h] = i
 	}
-	for _, required := range []string{"date", "name", "dollar_price"} {
+	for _, required := range []string{"date", "iso_a3", "name", "dollar_price"} {
 		if _, ok := col[required]; !ok {
-			return 0, "", fmt.Errorf("missing column %q", required)
+			return nil, fmt.Errorf("missing column %q", required)
 		}
 	}
 
-	var bestDate string
-	var bestPrice float64
+	var latest string
+	prices := make(map[string]bigMacPrice)
 
 	for {
 		row, err := reader.Read()
@@ -281,26 +348,45 @@ func fetchBigMacPrice() (float64, string, error) {
 			break
 		}
 		if err != nil {
-			return 0, "", err
-		}
-		if row[col["name"]] != "United States" {
-			continue
+			return nil, err
 		}
 		date := row[col["date"]]
-		if date > bestDate {
-			p, err := strconv.ParseFloat(row[col["dollar_price"]], 64)
-			if err != nil {
-				continue
-			}
-			bestDate = date
-			bestPrice = p
+		if date < latest {
+			continue
 		}
+		p, err := strconv.ParseFloat(row[col["dollar_price"]], 64)
+		if err != nil || !(p > 0) {
+			continue
+		}
+		if date > latest {
+			latest = date
+			clear(prices)
+		}
+		prices[row[col["iso_a3"]]] = bigMacPrice{Name: row[col["name"]], USD: p, Date: date}
 	}
 
-	if bestPrice == 0 {
-		return 0, "", fmt.Errorf("US Big Mac price not found in CSV")
+	if len(prices) == 0 {
+		return nil, fmt.Errorf("no Big Mac prices found in CSV")
 	}
-	return bestPrice, bestDate, nil
+	return prices, nil
+}
+
+// pickBigMacPrice returns the price for country. If country is not in the
+// latest survey, it returns the US price when fallbackToUS is set and an
+// error otherwise.
+func pickBigMacPrice(prices map[string]bigMacPrice, country string, fallbackToUS bool) (bigMacPrice, error) {
+	if p, ok := prices[country]; ok {
+		return p, nil
+	}
+	if !fallbackToUS {
+		return bigMacPrice{}, fmt.Errorf("%s is not in the latest Big Mac survey", country)
+	}
+	p, ok := prices[usCode]
+	if !ok {
+		return bigMacPrice{}, fmt.Errorf("US Big Mac price not found in CSV")
+	}
+	log.Printf("%s is not in the latest Big Mac survey, using the US price", country)
+	return p, nil
 }
 
 // --- PIXA price ---
@@ -415,6 +501,7 @@ func main() {
 	chainID := flag.String("chain-id", "", "Chain ID (hex). If empty, fetched from --rpc via database_api.get_config.")
 	tokenPrice := flag.Float64("token-price", 0.12, "Fallback price of 1 PIXA in USD, used while "+coinstoreSymbol+" on Coinstore has no trades")
 	interval := flag.Duration("interval", 1*time.Hour, "Feed publish interval")
+	countryFlag := flag.String("country", "", "Country whose Big Mac price to use, as an ISO 3166 code (e.g. CH, CHE) or EUZ for the euro area. If empty, detected from this machine's public IP, falling back to the US.")
 	once := flag.Bool("once", false, "Publish once and exit")
 	flag.Parse()
 
@@ -445,13 +532,32 @@ func main() {
 		log.Printf("Auto-detected chain_id: %s", *chainID)
 	}
 
+	// An explicit --country must be in the survey; a detected one falls back to the US.
+	country, fallbackToUS := *countryFlag, false
+	if country != "" {
+		if country, err = indexCountry(country); err != nil {
+			log.Fatalf("--country: %v", err)
+		}
+		log.Printf("Big Mac country: %s (from --country)", country)
+	} else if country, err = detectCountry(geoURL); err != nil {
+		country = usCode
+		log.Printf("Big Mac country: %s (IP geolocation failed: %v)", country, err)
+	} else {
+		fallbackToUS = true
+		log.Printf("Big Mac country: %s (detected from public IP)", country)
+	}
+
 	log.Printf("Big Mac Feed — witnesses=%s rpc=%s fallback-token=$%.4f interval=%s",
 		*witness, *rpc, *tokenPrice, *interval)
 
 	publish := func() error {
-		bigMacUSD, asOf, err := fetchBigMacPrice()
+		prices, err := fetchBigMacPrices(bigMacURL)
 		if err != nil {
-			return fmt.Errorf("fetch price: %w", err)
+			return fmt.Errorf("fetch Big Mac price: %w", err)
+		}
+		bigMac, err := pickBigMacPrice(prices, country, fallbackToUS)
+		if err != nil {
+			return err
 		}
 		pixaUSD, pixaSource, err := tokenPriceUSD(coinstorePriceURL, *tokenPrice)
 		if err != nil {
@@ -460,7 +566,7 @@ func main() {
 
 		// 1 PXS = 1 Big Mac
 		// How many PIXA to buy 1 Big Mac?
-		pixaPerBigMac := bigMacUSD / pixaUSD
+		pixaPerBigMac := bigMac.USD / pixaUSD
 
 		base := asset{Amount: 1000, Precision: 3, Symbol: "PXS"}
 		quote := asset{
@@ -469,8 +575,8 @@ func main() {
 			Symbol:    "PIXA",
 		}
 
-		log.Printf("Big Mac = $%.2f (as of %s), PIXA = $%g (%s) → 1 PXS = %s",
-			bigMacUSD, asOf, pixaUSD, pixaSource, quote.String())
+		log.Printf("Big Mac in %s = $%.2f (as of %s), PIXA = $%g (%s) → 1 PXS = %s",
+			bigMac.Name, bigMac.USD, bigMac.Date, pixaUSD, pixaSource, quote.String())
 
 		return publishAll(*rpc, *chainID, witnesses, base, quote)
 	}

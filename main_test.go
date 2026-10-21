@@ -252,3 +252,114 @@ func TestTokenPriceUSDFallsBackWhenPairHasNotTraded(t *testing.T) {
 		t.Errorf("price = %v, want fallback 0.12", got)
 	}
 }
+
+func TestIndexCountryNormalizesToBigMacIndexCodes(t *testing.T) {
+	for in, want := range map[string]string{
+		"US":   "USA",
+		"usa":  "USA",
+		" gb ": "GBR",
+		"CH":   "CHE",
+		"DE":   "EUZ", // euro area members are only listed as "Euro area"
+		"SVK":  "EUZ",
+		"BG":   "EUZ",
+		"euz":  "EUZ",
+	} {
+		got, err := indexCountry(in)
+		if err != nil || got != want {
+			t.Errorf("indexCountry(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestIndexCountryRejectsUnknownCode(t *testing.T) {
+	for _, in := range []string{"", "XYZ", "Germany"} {
+		if got, err := indexCountry(in); err == nil {
+			t.Errorf("indexCountry(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+// staticServer answers every request with status and body.
+func staticServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDetectCountryMapsIPLocationToIndexCode(t *testing.T) {
+	srv := staticServer(t, http.StatusOK, `{"city":"Bratislava","country":"SK","timezone":"Europe/Bratislava"}`)
+
+	got, err := detectCountry(srv.URL)
+	if err != nil || got != "EUZ" {
+		t.Fatalf("detectCountry = %q, %v; want EUZ", got, err)
+	}
+}
+
+func TestDetectCountryRejectsResponseWithoutCountry(t *testing.T) {
+	srv := staticServer(t, http.StatusOK, `{"bogon":true}`)
+
+	if got, err := detectCountry(srv.URL); err == nil {
+		t.Fatalf("detectCountry = %q, want error", got)
+	}
+}
+
+func TestDetectCountryReportsHTTPError(t *testing.T) {
+	srv := staticServer(t, http.StatusTooManyRequests, `{"error":"rate limited"}`)
+
+	if got, err := detectCountry(srv.URL); err == nil {
+		t.Fatalf("detectCountry = %q, want error", got)
+	}
+}
+
+const testBigMacCSV = `date,iso_a3,currency_code,name,local_price,dollar_ex,dollar_price
+2022-01-01,RUS,RUB,Russia,135,74.7,1.81
+2026-01-01,USA,USD,United States,6.01,1,6.01
+2026-07-01,USA,USD,United States,6.22,1,6.22
+2026-07-01,EUZ,EUR,Euro area,6.19,0.87439,7.07922094259998
+`
+
+func TestFetchBigMacPricesKeepsOnlyLatestSurvey(t *testing.T) {
+	srv := staticServer(t, http.StatusOK, testBigMacCSV)
+
+	got, err := fetchBigMacPrices(srv.URL)
+	if err != nil {
+		t.Fatalf("fetchBigMacPrices: %v", err)
+	}
+	want := map[string]bigMacPrice{
+		"USA": {Name: "United States", USD: 6.22, Date: "2026-07-01"},
+		"EUZ": {Name: "Euro area", USD: 7.07922094259998, Date: "2026-07-01"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prices = %+v, want %+v (Russia dropped from the latest survey)", got, want)
+	}
+}
+
+var testPrices = map[string]bigMacPrice{
+	"USA": {Name: "United States", USD: 6.22, Date: "2026-07-01"},
+	"EUZ": {Name: "Euro area", USD: 7.08, Date: "2026-07-01"},
+}
+
+func TestPickBigMacPriceUsesCountry(t *testing.T) {
+	got, err := pickBigMacPrice(testPrices, "EUZ", true)
+	if err != nil || got.Name != "Euro area" {
+		t.Fatalf("pickBigMacPrice = %+v, %v; want Euro area", got, err)
+	}
+}
+
+func TestPickBigMacPriceFallsBackToUSForDetectedCountry(t *testing.T) {
+	got, err := pickBigMacPrice(testPrices, "RUS", true)
+	if err != nil || got.Name != "United States" {
+		t.Fatalf("pickBigMacPrice = %+v, %v; want United States fallback", got, err)
+	}
+}
+
+func TestPickBigMacPriceRejectsMissingCountryFromFlag(t *testing.T) {
+	got, err := pickBigMacPrice(testPrices, "RUS", false)
+	if err == nil || !strings.Contains(err.Error(), "RUS") {
+		t.Fatalf("pickBigMacPrice = %+v, %v; want error naming RUS", got, err)
+	}
+}
