@@ -190,70 +190,6 @@ func TestPublishAllContinuesAfterOneWitnessFails(t *testing.T) {
 	}
 }
 
-// coinstoreServer serves body as the Coinstore ticker/price response.
-func coinstoreServer(t *testing.T, body string) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestFetchCoinstorePricePicksSymbolFromFullList(t *testing.T) {
-	srv := coinstoreServer(t, `{"data":[{"id":4,"symbol":"BTCUSDT","price":"82151.1"},{"id":1972,"symbol":"PIXAUSDT","price":"0.0042"}],"code":0}`)
-
-	got, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
-	if err != nil {
-		t.Fatalf("fetchCoinstorePrice: %v", err)
-	}
-	if got != 0.0042 {
-		t.Errorf("price = %v, want 0.0042", got)
-	}
-}
-
-func TestFetchCoinstorePriceRejectsUnlistedSymbol(t *testing.T) {
-	srv := coinstoreServer(t, `{"data":[{"id":4,"symbol":"BTCUSDT","price":"82151.1"}],"code":0}`)
-
-	_, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
-	if err == nil || !strings.Contains(err.Error(), "PIXAUSDT") {
-		t.Fatalf("expected error naming PIXAUSDT, got %v", err)
-	}
-}
-
-func TestFetchCoinstorePriceReportsAPIError(t *testing.T) {
-	srv := coinstoreServer(t, `{"code":401,"message":"Unauthorized"}`)
-
-	_, err := fetchCoinstorePrice(srv.URL, "PIXAUSDT")
-	if err == nil || !strings.Contains(err.Error(), "Unauthorized") {
-		t.Fatalf("expected Coinstore error, got %v", err)
-	}
-}
-
-func TestTokenPriceUSDUsesLiveCoinstorePrice(t *testing.T) {
-	srv := coinstoreServer(t, `{"data":[{"id":1972,"symbol":"PIXAUSDT","price":"0.0042"}],"code":0}`)
-
-	got, _, err := tokenPriceUSD(srv.URL, 0.12)
-	if err != nil {
-		t.Fatalf("tokenPriceUSD: %v", err)
-	}
-	if got != 0.0042 {
-		t.Errorf("price = %v, want live 0.0042", got)
-	}
-}
-
-func TestTokenPriceUSDFallsBackWhenPairHasNotTraded(t *testing.T) {
-	srv := coinstoreServer(t, `{"data":[{"id":1972,"symbol":"PIXAUSDT","price":"0"}],"code":0}`)
-
-	got, _, err := tokenPriceUSD(srv.URL, 0.12)
-	if err != nil {
-		t.Fatalf("tokenPriceUSD: %v", err)
-	}
-	if got != 0.12 {
-		t.Errorf("price = %v, want fallback 0.12", got)
-	}
-}
-
 func TestIndexCountryNormalizesToBigMacIndexCodes(t *testing.T) {
 	for in, want := range map[string]string{
 		"US":   "USA",
@@ -331,8 +267,8 @@ func TestFetchBigMacPricesKeepsOnlyLatestSurvey(t *testing.T) {
 		t.Fatalf("fetchBigMacPrices: %v", err)
 	}
 	want := map[string]bigMacPrice{
-		"USA": {Name: "United States", USD: 6.22, Date: "2026-07-01"},
-		"EUZ": {Name: "Euro area", USD: 7.07922094259998, Date: "2026-07-01"},
+		"USA": {Name: "United States", Price: 6.22, Currency: "USD", Date: "2026-07-01"},
+		"EUZ": {Name: "Euro area", Price: 6.19, Currency: "EUR", Date: "2026-07-01"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("prices = %+v, want %+v (Russia dropped from the latest survey)", got, want)
@@ -340,8 +276,8 @@ func TestFetchBigMacPricesKeepsOnlyLatestSurvey(t *testing.T) {
 }
 
 var testPrices = map[string]bigMacPrice{
-	"USA": {Name: "United States", USD: 6.22, Date: "2026-07-01"},
-	"EUZ": {Name: "Euro area", USD: 7.08, Date: "2026-07-01"},
+	"USA": {Name: "United States", Price: 6.22, Currency: "USD", Date: "2026-07-01"},
+	"EUZ": {Name: "Euro area", Price: 6.19, Currency: "EUR", Date: "2026-07-01"},
 }
 
 func TestPickBigMacPriceUsesCountry(t *testing.T) {
@@ -355,6 +291,52 @@ func TestPickBigMacPriceFallsBackToUSForDetectedCountry(t *testing.T) {
 	got, err := pickBigMacPrice(testPrices, "RUS", true)
 	if err != nil || got.Name != "United States" {
 		t.Fatalf("pickBigMacPrice = %+v, %v; want United States fallback", got, err)
+	}
+}
+
+func TestFetchBigMacPricesSkipsRowsWithoutUsableLocalPrice(t *testing.T) {
+	srv := staticServer(t, http.StatusOK, `date,iso_a3,currency_code,name,local_price,dollar_ex,dollar_price
+2026-07-01,USA,USD,United States,6.22,1,6.22
+2026-07-01,XXX,,Nowhere,5,1,5
+2026-07-01,YYY,YYY,Free lunch,0,1,0
+`)
+
+	got, err := fetchBigMacPrices(srv.URL)
+	if err != nil {
+		t.Fatalf("fetchBigMacPrices: %v", err)
+	}
+	if len(got) != 1 || got["USA"].Price != 6.22 {
+		t.Errorf("prices = %+v, want only the US row", got)
+	}
+}
+
+func TestFetchBigMacPricesReportsHTTPError(t *testing.T) {
+	srv := staticServer(t, http.StatusNotFound, "not found")
+
+	if _, err := fetchBigMacPrices(srv.URL); err == nil {
+		t.Fatal("expected error for HTTP 404, got nil")
+	}
+}
+
+func TestParsePriceSpecAcceptsCommonForms(t *testing.T) {
+	for in, want := range map[string]bigMacPrice{
+		"7.30 CHF": {Price: 7.3, Currency: "CHF"},
+		"CHF 7.30": {Price: 7.3, Currency: "CHF"},
+		"7,30 chf": {Price: 7.3, Currency: "CHF"},
+		"500JPY":   {Price: 500, Currency: "JPY"},
+	} {
+		got, err := parsePriceSpec(in)
+		if err != nil || got.Price != want.Price || got.Currency != want.Currency {
+			t.Errorf("parsePriceSpec(%q) = %+v, %v; want %v %s", in, got, err, want.Price, want.Currency)
+		}
+	}
+}
+
+func TestParsePriceSpecRejectsMissingCurrencyOrAmount(t *testing.T) {
+	for _, in := range []string{"7.30", "CHF", "0 CHF", "CHF 7.30 EUR", "seven CHF", ""} {
+		if got, err := parsePriceSpec(in); err == nil {
+			t.Errorf("parsePriceSpec(%q) = %+v, want error", in, got)
+		}
 	}
 }
 
@@ -379,10 +361,12 @@ func TestNetworkCallsTimeOut(t *testing.T) {
 	defer func() { httpClient.Timeout = old }()
 
 	calls := map[string]func() error{
-		"rpcCall":             func() error { _, err := rpcCall(srv.URL, "condenser_api.get_config", []interface{}{}); return err },
-		"detectCountry":       func() error { _, err := detectCountry(srv.URL); return err },
-		"fetchBigMacPrices":   func() error { _, err := fetchBigMacPrices(srv.URL); return err },
-		"fetchCoinstorePrice": func() error { _, err := fetchCoinstorePrice(srv.URL, coinstoreSymbol); return err },
+		"rpcCall":            func() error { _, err := rpcCall(srv.URL, "condenser_api.get_config", []interface{}{}); return err },
+		"detectCountry":      func() error { _, err := detectCountry(srv.URL); return err },
+		"fetchBigMacPrices":  func() error { _, err := fetchBigMacPrices(srv.URL); return err },
+		"fetchCoinstoreBook": func() error { _, err := fetchCoinstoreBook(srv.URL+"/", "PIXAUSDT"); return err },
+		"frankfurterFX":      func() error { _, _, err := frankfurterFX{srv.URL}.rate("USD", "CHF"); return err },
+		"erAPIFX":            func() error { _, _, err := erAPIFX{srv.URL}.rate("USD", "ARS"); return err },
 	}
 	for name, call := range calls {
 		done := make(chan error, 1)

@@ -1,2 +1,3 @@
 bigmac-feed
 .git
+*_test.go
