@@ -2,7 +2,7 @@ FROM golang:1.27-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
+COPY *.go latest.csv ./
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o bigmac-feed .
 
 FROM alpine:3.24

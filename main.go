@@ -34,9 +34,9 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "Compute and log the feed without broadcasting; no WIF needed")
 
 	// Big Mac
-	countryFlag := flag.String("country", "", "Country whose Big Mac price to use, as an ISO 3166 code (e.g. CH, CHE) or EUZ for the euro area. If empty, detected from this machine's public IP, falling back to the US.")
-	bigMacInline := flag.String("bigmac-price", "", "Big Mac price observed by this witness, with its currency (e.g. \"7.30 CHF\"). Overrides --country and the index.")
-	bigMacURL := flag.String("bigmac-url", defaultBigMacURL, "CSV of The Economist's Big Mac index")
+	countryFlag := flag.String("country", "", "Country whose Big Mac price to use, as an ISO 3166 code (e.g. CH, CHE), or EUZ for the median of the euro area countries in the price file. If empty, detected from this machine's public IP.")
+	bigMacInline := flag.String("bigmac-price", "", "Pick-up price of a Big Mac observed by this witness, with its currency (e.g. \"7.30 CHF\"). Overrides --country and the price file.")
+	bigMacURL := flag.String("bigmac-url", defaultBigMacURL, "Price file: CSV of pick-up prices per country (country_code, currency_code, low, high, median, date). Empty = use only the copy built into this version.")
 
 	// PIXA
 	var pairs pairList
@@ -86,7 +86,7 @@ func main() {
 		log.Printf("Auto-detected chain_id: %s", *chainID)
 	}
 
-	// --- Big Mac source: --bigmac-price, else the index for the country ---
+	// --- Big Mac source: --bigmac-price, else the price file's row for the country ---
 	var bigMac func() (bigMacPrice, error)
 	if *bigMacInline != "" {
 		p, err := parsePriceSpec(*bigMacInline)
@@ -96,27 +96,34 @@ func main() {
 		log.Printf("Big Mac price: %s (from --bigmac-price)", p)
 		bigMac = func() (bigMacPrice, error) { return p, nil }
 	} else {
-		// An explicit --country must be in the survey; a detected one falls back to the US.
-		country, fallbackToUS := *countryFlag, false
-		var err error
-		if country != "" {
-			if country, err = indexCountry(country); err != nil {
+		country := ""
+		if *countryFlag != "" {
+			var err error
+			if country, err = normalizeCountry(*countryFlag); err != nil {
 				log.Fatalf("--country: %v", err)
 			}
 			log.Printf("Big Mac country: %s (from --country)", country)
-		} else if country, err = detectCountry(geoURL); err != nil {
-			country = usCode
-			log.Printf("Big Mac country: %s (IP geolocation failed: %v)", country, err)
-		} else {
-			fallbackToUS = true
-			log.Printf("Big Mac country: %s (detected from public IP)", country)
 		}
+		source := &priceSource{url: *bigMacURL}
 		bigMac = func() (bigMacPrice, error) {
-			prices, err := fetchBigMacPrices(*bigMacURL)
-			if err != nil {
-				return bigMacPrice{}, fmt.Errorf("fetch Big Mac price: %w", err)
+			// No country stands in for one that cannot be detected: the round
+			// fails and the detection is tried again at the next one.
+			if country == "" {
+				detected, err := detectCountry(geoURL)
+				if err != nil {
+					return bigMacPrice{}, fmt.Errorf("cannot tell which country this server is in (%v): set --country or --bigmac-price", err)
+				}
+				country = detected
+				log.Printf("Big Mac country: %s (detected from public IP)", country)
 			}
-			return pickBigMacPrice(prices, country, fallbackToUS)
+			prices, origin, err := source.prices()
+			if err != nil {
+				return bigMacPrice{}, err
+			}
+			if origin != "" {
+				log.Printf("Big Mac prices: using the %s", origin)
+			}
+			return pickBigMacPrice(prices, country)
 		}
 	}
 

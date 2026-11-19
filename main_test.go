@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/mr-tron/base58"
+	"golang.org/x/text/currency"
 )
 
 // testWIF builds a valid uncompressed WIF (0x80 || key || checksum) for a
@@ -190,28 +194,28 @@ func TestPublishAllContinuesAfterOneWitnessFails(t *testing.T) {
 	}
 }
 
-func TestIndexCountryNormalizesToBigMacIndexCodes(t *testing.T) {
+func TestNormalizeCountryAcceptsAlpha2Alpha3AndTheEuroArea(t *testing.T) {
 	for in, want := range map[string]string{
-		"US":   "USA",
-		"usa":  "USA",
-		" gb ": "GBR",
-		"CH":   "CHE",
-		"DE":   "EUZ", // euro area members are only listed as "Euro area"
-		"SVK":  "EUZ",
-		"BG":   "EUZ",
+		"US":   "US",
+		"usa":  "US",
+		" gb ": "GB",
+		"CH":   "CH",
+		"CHE":  "CH",
+		"DE":   "DE", // euro area members have their own rows
+		"SVK":  "SK",
 		"euz":  "EUZ",
 	} {
-		got, err := indexCountry(in)
+		got, err := normalizeCountry(in)
 		if err != nil || got != want {
-			t.Errorf("indexCountry(%q) = %q, %v; want %q", in, got, err, want)
+			t.Errorf("normalizeCountry(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
 }
 
-func TestIndexCountryRejectsUnknownCode(t *testing.T) {
-	for _, in := range []string{"", "XYZ", "Germany"} {
-		if got, err := indexCountry(in); err == nil {
-			t.Errorf("indexCountry(%q) = %q, want error", in, got)
+func TestNormalizeCountryRejectsUnknownCode(t *testing.T) {
+	for _, in := range []string{"", "XYZ", "Germany", "001"} {
+		if got, err := normalizeCountry(in); err == nil {
+			t.Errorf("normalizeCountry(%q) = %q, want error", in, got)
 		}
 	}
 }
@@ -227,12 +231,12 @@ func staticServer(t *testing.T, status int, body string) *httptest.Server {
 	return srv
 }
 
-func TestDetectCountryMapsIPLocationToIndexCode(t *testing.T) {
+func TestDetectCountryReturnsTheCountryOfTheIP(t *testing.T) {
 	srv := staticServer(t, http.StatusOK, `{"city":"Bratislava","country":"SK","timezone":"Europe/Bratislava"}`)
 
 	got, err := detectCountry(srv.URL)
-	if err != nil || got != "EUZ" {
-		t.Fatalf("detectCountry = %q, %v; want EUZ", got, err)
+	if err != nil || got != "SK" {
+		t.Fatalf("detectCountry = %q, %v; want SK", got, err)
 	}
 }
 
@@ -252,61 +256,77 @@ func TestDetectCountryReportsHTTPError(t *testing.T) {
 	}
 }
 
-const testBigMacCSV = `date,iso_a3,currency_code,name,local_price,dollar_ex,dollar_price
-2022-01-01,RUS,RUB,Russia,135,74.7,1.81
-2026-01-01,USA,USD,United States,6.01,1,6.01
-2026-07-01,USA,USD,United States,6.22,1,6.22
-2026-07-01,EUZ,EUR,Euro area,6.19,0.87439,7.07922094259998
+const priceFileHeader = "country_code,currency_code,low,high,median,date,sources\n"
+
+const testPriceCSV = priceFileHeader + `US,USD,5.69,6.89,6.29,2026-09-30,"two restaurants: https://example.org/a | https://example.org/b"
+DE,EUR,5.99,8.39,6.99,2026-10-24,https://example.org/de
+FR,EUR,6.50,6.50,6.50,2026-10-01,https://example.org/fr
+JP,JPY,500,500,500,2026-02-25,https://example.org/jp
 `
 
-func TestFetchBigMacPricesKeepsOnlyLatestSurvey(t *testing.T) {
-	srv := staticServer(t, http.StatusOK, testBigMacCSV)
-
-	got, err := fetchBigMacPrices(srv.URL)
-	if err != nil {
-		t.Fatalf("fetchBigMacPrices: %v", err)
-	}
-	want := map[string]bigMacPrice{
-		"USA": {Name: "United States", Price: 6.22, Currency: "USD", Date: "2026-07-01"},
-		"EUZ": {Name: "Euro area", Price: 6.19, Currency: "EUR", Date: "2026-07-01"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("prices = %+v, want %+v (Russia dropped from the latest survey)", got, want)
-	}
-}
-
 var testPrices = map[string]bigMacPrice{
-	"USA": {Name: "United States", Price: 6.22, Currency: "USD", Date: "2026-07-01"},
-	"EUZ": {Name: "Euro area", Price: 6.19, Currency: "EUR", Date: "2026-07-01"},
+	"US": {Name: "US", Price: 6.29, Low: 5.69, High: 6.89, Currency: "USD", Date: "2026-09-30"},
+	"DE": {Name: "DE", Price: 6.99, Low: 5.99, High: 8.39, Currency: "EUR", Date: "2026-10-24"},
+	"FR": {Name: "FR", Price: 6.5, Low: 6.5, High: 6.5, Currency: "EUR", Date: "2026-10-01"},
+	"JP": {Name: "JP", Price: 500, Low: 500, High: 500, Currency: "JPY", Date: "2026-02-25"},
 }
 
-func TestPickBigMacPriceUsesCountry(t *testing.T) {
-	got, err := pickBigMacPrice(testPrices, "EUZ", true)
-	if err != nil || got.Name != "Euro area" {
-		t.Fatalf("pickBigMacPrice = %+v, %v; want Euro area", got, err)
-	}
-}
-
-func TestPickBigMacPriceFallsBackToUSForDetectedCountry(t *testing.T) {
-	got, err := pickBigMacPrice(testPrices, "RUS", true)
-	if err != nil || got.Name != "United States" {
-		t.Fatalf("pickBigMacPrice = %+v, %v; want United States fallback", got, err)
-	}
-}
-
-func TestFetchBigMacPricesSkipsRowsWithoutUsableLocalPrice(t *testing.T) {
-	srv := staticServer(t, http.StatusOK, `date,iso_a3,currency_code,name,local_price,dollar_ex,dollar_price
-2026-07-01,USA,USD,United States,6.22,1,6.22
-2026-07-01,XXX,,Nowhere,5,1,5
-2026-07-01,YYY,YYY,Free lunch,0,1,0
-`)
+func TestFetchBigMacPricesReadsTheMedianOfEachCountry(t *testing.T) {
+	srv := staticServer(t, http.StatusOK, testPriceCSV)
 
 	got, err := fetchBigMacPrices(srv.URL)
 	if err != nil {
 		t.Fatalf("fetchBigMacPrices: %v", err)
 	}
-	if len(got) != 1 || got["USA"].Price != 6.22 {
-		t.Errorf("prices = %+v, want only the US row", got)
+	if !reflect.DeepEqual(got, testPrices) {
+		t.Errorf("prices = %+v, want %+v", got, testPrices)
+	}
+}
+
+func TestParseBigMacPricesLeavesOutUnusableRows(t *testing.T) {
+	got, err := parseBigMacPrices(strings.NewReader(priceFileHeader + `US,USD,5.69,6.89,6.29,2026-09-30,the only good row
+Nowhere,USD,5,5,5,2026-01-01,unknown country
+EUZ,EUR,6,6,6,2026-01-01,the euro area is computed and has no row of its own
+CH,,7.2,7.2,7.2,2026-02-21,no currency
+GB,GBP,0,0,0,2026-01-01,free lunch
+FR,EUR,7.00,6.00,6.50,2026-10-01,low above median
+IT,EUR,5,7,8,2026-10-01,median above high
+ES,EUR,6,6,6,October 2026,date not YYYY-MM-DD
+NL,EUR,six,6,6,2026-10-01,not a number
+SE,SEK,69
+US,USD,1,1,1,2026-01-01,second row for the same country
+`))
+	if err != nil {
+		t.Fatalf("parseBigMacPrices: %v", err)
+	}
+	if len(got) != 1 || got["US"].Price != 6.29 {
+		t.Errorf("prices = %+v, want only the first US row", got)
+	}
+}
+
+func TestParseBigMacPricesFindsColumnsByNameAndAcceptsAlpha3(t *testing.T) {
+	got, err := parseBigMacPrices(strings.NewReader(`sources,median,low,high,currency_code,country_code,date,note
+x,7.2,7.1,7.5,chf,CHE,2026-02-21,an extra column
+`))
+	want := map[string]bigMacPrice{"CH": {Name: "CH", Price: 7.2, Low: 7.1, High: 7.5, Currency: "CHF", Date: "2026-02-21"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("prices = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestParseBigMacPricesRejectsAnotherKindOfFile(t *testing.T) {
+	// The Economist's index, which the feed read until v1.3.0.
+	_, err := parseBigMacPrices(strings.NewReader(`date,iso_a3,currency_code,name,local_price,dollar_ex,dollar_price
+2026-07-01,USA,USD,United States,6.22,1,6.22
+`))
+	if err == nil || !strings.Contains(err.Error(), "country_code") {
+		t.Fatalf("expected an error naming the missing country_code column, got %v", err)
+	}
+}
+
+func TestParseBigMacPricesRejectsFileWithoutUsableRow(t *testing.T) {
+	if got, err := parseBigMacPrices(strings.NewReader(priceFileHeader)); err == nil {
+		t.Fatalf("prices = %+v, want error", got)
 	}
 }
 
@@ -315,6 +335,168 @@ func TestFetchBigMacPricesReportsHTTPError(t *testing.T) {
 
 	if _, err := fetchBigMacPrices(srv.URL); err == nil {
 		t.Fatal("expected error for HTTP 404, got nil")
+	}
+}
+
+func TestPickBigMacPriceUsesTheCountrysOwnRow(t *testing.T) {
+	got, err := pickBigMacPrice(testPrices, "DE")
+	if err != nil || got != testPrices["DE"] {
+		t.Fatalf("pickBigMacPrice = %+v, %v; want the DE row", got, err)
+	}
+}
+
+func TestPickBigMacPriceHasNoStandInForAMissingCountry(t *testing.T) {
+	// Slovakia is in the euro area and has no row: neither the euro area
+	// median nor another country's price may be used in its place.
+	got, err := pickBigMacPrice(testPrices, "SK")
+	if err == nil || !strings.Contains(err.Error(), "SK") || !strings.Contains(err.Error(), "--bigmac-price") {
+		t.Fatalf("pickBigMacPrice = %+v, %v; want an error naming SK and --bigmac-price", got, err)
+	}
+}
+
+func TestPickBigMacPriceEuroAreaIsTheMedianOfItsCountries(t *testing.T) {
+	got, err := pickBigMacPrice(testPrices, "EUZ")
+	if err != nil {
+		t.Fatalf("pickBigMacPrice: %v", err)
+	}
+	if got.Price != (6.99+6.5)/2 || got.Currency != "EUR" || got.Low != 5.99 || got.High != 8.39 {
+		t.Errorf("euro area = %+v, want the median of DE and FR in EUR, from 5.99 to 8.39", got)
+	}
+	if got.Date != "2026-10-01" {
+		t.Errorf("euro area date = %q, want the oldest of its rows, 2026-10-01", got.Date)
+	}
+	if !strings.Contains(got.Name, "DE, FR") {
+		t.Errorf("euro area name = %q, want it to list DE, FR", got.Name)
+	}
+}
+
+func TestPickBigMacPriceEuroAreaNeedsAEuroAreaRow(t *testing.T) {
+	prices := map[string]bigMacPrice{"US": testPrices["US"], "JP": testPrices["JP"]}
+	if got, err := pickBigMacPrice(prices, "EUZ"); err == nil {
+		t.Fatalf("pickBigMacPrice = %+v, want error", got)
+	}
+}
+
+func TestPriceSourceFallsBackToTheLastCopyFetched(t *testing.T) {
+	down := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprint(w, testPriceCSV)
+	}))
+	defer srv.Close()
+	source := &priceSource{url: srv.URL}
+
+	got, origin, err := source.prices()
+	if err != nil || origin != "" || !reflect.DeepEqual(got, testPrices) {
+		t.Fatalf("prices = %+v, %q, %v; want the published file", got, origin, err)
+	}
+
+	down = true
+	got, origin, err = source.prices()
+	if err != nil || origin != "last copy fetched" || !reflect.DeepEqual(got, testPrices) {
+		t.Fatalf("prices = %+v, %q, %v; want the last copy fetched", got, origin, err)
+	}
+}
+
+func TestPriceSourceFallsBackToTheBuiltInCopy(t *testing.T) {
+	srv := staticServer(t, http.StatusServiceUnavailable, "down")
+	builtIn, err := parseBigMacPrices(bytes.NewReader(embeddedPrices))
+	if err != nil {
+		t.Fatalf("built-in price file: %v", err)
+	}
+
+	for name, url := range map[string]string{"published file out of reach": srv.URL, "no URL": ""} {
+		got, origin, err := (&priceSource{url: url}).prices()
+		if err != nil || origin != "copy built into this version" || !reflect.DeepEqual(got, builtIn) {
+			t.Errorf("%s: prices = %+v, %q, %v; want the built-in copy", name, got, origin, err)
+		}
+	}
+}
+
+// checkPriceFile applies the rules of the README's "Price data" section to a
+// price file and returns what breaks them. It is stricter than the feed's
+// own reader, which leaves a bad row out instead of failing.
+func checkPriceFile(data []byte) []string {
+	var problems []string
+	rows, err := csv.NewReader(bytes.NewReader(data)).ReadAll()
+	if err != nil {
+		return []string{err.Error()}
+	}
+	if len(rows) < 2 {
+		return []string{"no rows"}
+	}
+	if got := strings.Join(rows[0], ","); got+"\n" != priceFileHeader {
+		problems = append(problems, fmt.Sprintf("header is %q, want %q", got, strings.TrimSpace(priceFileHeader)))
+	}
+	previous := ""
+	for i, row := range rows[1:] {
+		line := i + 2
+		if len(row) != 7 {
+			problems = append(problems, fmt.Sprintf("line %d: %d fields, want 7", line, len(row)))
+			continue
+		}
+		country, currencyCode, date, sources := row[0], row[1], row[5], row[6]
+		if normalized, err := normalizeCountry(country); err != nil || normalized != country || len(country) != 2 {
+			problems = append(problems, fmt.Sprintf("line %d: country_code %q is not an ISO 3166 alpha-2 code", line, country))
+		}
+		if country <= previous {
+			problems = append(problems, fmt.Sprintf("line %d: %s must come after %s, one row per country in alphabetical order", line, country, previous))
+		}
+		previous = country
+		if unit, err := currency.ParseISO(currencyCode); err != nil || unit.String() != currencyCode {
+			problems = append(problems, fmt.Sprintf("line %d: currency_code %q is not an ISO 4217 code", line, currencyCode))
+		}
+		low, high, median := parsePrice(row[2]), parsePrice(row[3]), parsePrice(row[4])
+		if !(low > 0) || low > median || median > high || math.IsInf(high, 0) {
+			problems = append(problems, fmt.Sprintf("line %d: need 0 < low <= median <= high, got %s, %s, %s", line, row[2], row[4], row[3]))
+		}
+		day, err := time.Parse("2006-01-02", date)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("line %d: date %q is not YYYY-MM-DD", line, date))
+		} else if day.After(time.Now().Add(24 * time.Hour)) {
+			problems = append(problems, fmt.Sprintf("line %d: date %s is in the future", line, date))
+		}
+		if strings.TrimSpace(sources) == "" {
+			problems = append(problems, fmt.Sprintf("line %d: no source", line))
+		}
+	}
+	if parsed, err := parseBigMacPrices(bytes.NewReader(data)); err != nil || len(parsed) != len(rows)-1 {
+		problems = append(problems, fmt.Sprintf("the feed reads %d of the %d rows (%v)", len(parsed), len(rows)-1, err))
+	}
+	return problems
+}
+
+func TestPriceFilesFollowTheRules(t *testing.T) {
+	for _, name := range []string{"latest.csv", "delivery.csv"} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, problem := range checkPriceFile(data) {
+			t.Errorf("%s: %s", name, problem)
+		}
+	}
+}
+
+func TestCheckPriceFileCatchesBrokenRows(t *testing.T) {
+	problems := checkPriceFile([]byte(priceFileHeader + `DE,EUR,5.99,8.39,6.99,2026-10-24,https://example.org/de
+CHE,CHF,7.2,7.2,7.2,2026-02-21,alpha-3 code
+AT,EURO,6,6,6,2026-10-01,bad currency
+FR,EUR,7,6,6.5,2026-10-01,low above median
+JP,JPY,500,500,500,2999-01-01,date in the future
+KR,KRW,5700,5700,5700,2026-02-20,
+`))
+	for _, want := range []string{"line 3: country_code", "line 4: currency_code", "line 4: AT must come after", "line 5: need 0 < low", "line 6: date 2999-01-01 is in the future", "line 7: no source"} {
+		found := false
+		for _, p := range problems {
+			found = found || strings.Contains(p, want)
+		}
+		if !found {
+			t.Errorf("missing problem %q in %q", want, problems)
+		}
 	}
 }
 
@@ -337,13 +519,6 @@ func TestParsePriceSpecRejectsMissingCurrencyOrAmount(t *testing.T) {
 		if got, err := parsePriceSpec(in); err == nil {
 			t.Errorf("parsePriceSpec(%q) = %+v, want error", in, got)
 		}
-	}
-}
-
-func TestPickBigMacPriceRejectsMissingCountryFromFlag(t *testing.T) {
-	got, err := pickBigMacPrice(testPrices, "RUS", false)
-	if err == nil || !strings.Contains(err.Error(), "RUS") {
-		t.Fatalf("pickBigMacPrice = %+v, %v; want error naming RUS", got, err)
 	}
 }
 
