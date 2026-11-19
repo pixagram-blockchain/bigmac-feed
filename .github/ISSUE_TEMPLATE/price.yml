@@ -30,8 +30,8 @@ body:
       label: Restaurants and prices
       description: One line per restaurant, with its name or address and the price you read
       placeholder: |
-        Delémont, Route de Porrentruy 80: 7.50
-        Biel/Bienne, Bahnhofplatz: 7.50
+        First restaurant, street and town: 7.50
+        Second restaurant, street and town: 7.60
     validations:
       required: true
   - type: input
