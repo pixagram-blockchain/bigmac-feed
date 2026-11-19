@@ -47,7 +47,12 @@ The rules:
 
 ### Reporting a price
 
-Read the price of a Big Mac on its own at your restaurant: in the McDonald's app, start an order to collect at that restaurant; or read the menu board. Then open a pull request that adds or updates your country's row in `latest.csv`, with the restaurant, the day and the price in `sources`, and run `go test ./...`. Several restaurants make a better row than one: `low` and `high` are the extremes, `median` the middle.
+Read the price of a Big Mac on its own at your restaurant: in the McDonald's app, choose the restaurant and open the Big Mac; or read the menu board. In Switzerland the app shows prices without an account. Several restaurants make a better row than one: `low` and `high` are the extremes, `median` the middle.
+
+Then either:
+
+- [open a price report](https://github.com/pixagram-blockchain/bigmac-feed/issues/new?template=price.yml): a short form for the country, the restaurants, the prices and the day; or
+- open a pull request that adds or updates your country's row in `latest.csv`, with the restaurant, the day and the price in `sources`, and run `go test ./...`.
 
 Until your country has a row, state your price to the feed yourself with `--bigmac-price`.
 
