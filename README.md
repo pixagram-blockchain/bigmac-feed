@@ -33,7 +33,7 @@ Both files have the same columns:
 | `currency_code` | ISO 4217 code of the currency the prices are in, the country's own |
 | `low`, `high` | The lowest and the highest price observed |
 | `median` | The median of the prices observed. This is the price the feed uses |
-| `date` | The day the prices were observed, `YYYY-MM-DD`. For `delivery.csv`, the day the page was read: a page read through a search engine can be an older copy |
+| `date` | The day the prices were observed, `YYYY-MM-DD`; for a row that combines several days, the latest. For `delivery.csv`, the day the page was read: a page read through a search engine can be an older copy |
 | `sources` | Where each price was read, separated by ` \| ` |
 
 The rules:
