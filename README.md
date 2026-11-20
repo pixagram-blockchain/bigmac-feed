@@ -163,3 +163,21 @@ go test ./...
 `latest.csv` is built into the binary, so a new price reaches witnesses in two ways: at once through the published file, and with the next release as the built-in copy.
 
 `chain.go` holds the transaction building, signing and broadcast; `bigmac.go` the price file and the Big Mac price; `market.go` the order book and fair value; `fx.go` the currency conversion; `feed.go` the ratio; `main.go` wires them.
+
+## Release
+
+Pushing a version tag publishes the image:
+
+```bash
+git tag v1.4.0 && git push origin v1.4.0
+```
+
+The `Release image` workflow runs the tests, builds the image for linux/amd64 and pushes `pixarex/bigmac-feed:<version>` and `pixarex/bigmac-feed:latest` to Docker Hub. It can also be started from the Actions tab with a version. It needs two repository secrets: `DOCKERHUB_USERNAME` (pixarex) and `DOCKERHUB_TOKEN`, a Docker Hub access token with Read & Write permission.
+
+To publish from a machine of your own instead, build for linux/amd64, which the published images are, even on an Apple silicon Mac:
+
+```bash
+docker login -u pixarex
+docker build --platform linux/amd64 -t pixarex/bigmac-feed:v1.4.0 -t pixarex/bigmac-feed:latest .
+docker push pixarex/bigmac-feed:v1.4.0 && docker push pixarex/bigmac-feed:latest
+```
