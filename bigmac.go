@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	_ "embed"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,36 +11,46 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/text/language"
 )
 
 const (
-	defaultBigMacURL = "https://cdn.economistdatateam.com/big-mac/data/big-mac-full-index-jul-26.csv"
+	// defaultBigMacURL is Pixa's own price file, latest.csv in this repository:
+	// the pick-up price of one Big Mac per country, in the country's currency.
+	// See "Price data" in the README.
+	defaultBigMacURL = "https://raw.githubusercontent.com/pixagram-blockchain/bigmac-feed/main/latest.csv"
 	geoURL           = "https://ipinfo.io/json"
 
-	// Big Mac index country codes (iso_a3, plus EUZ for the euro area).
-	usCode       = "USA"
+	// euroAreaCode is accepted by --country for the euro area as a whole: the
+	// median of the euro area countries that have a row in the price file.
 	euroAreaCode = "EUZ"
 )
 
-// euroArea lists the euro area members by ISO 3166 alpha-3 code. The Big Mac
-// index has no rows for them, only one "Euro area" row.
+// embeddedPrices is latest.csv as it was when this binary was built. The feed
+// falls back to it when the published file cannot be fetched.
+//
+//go:embed latest.csv
+var embeddedPrices []byte
+
+// euroArea lists the euro area members by ISO 3166 alpha-2 code.
 var euroArea = map[string]bool{
-	"AUT": true, "BEL": true, "BGR": true, "CYP": true, "DEU": true,
-	"ESP": true, "EST": true, "FIN": true, "FRA": true, "GRC": true,
-	"HRV": true, "IRL": true, "ITA": true, "LTU": true, "LUX": true,
-	"LVA": true, "MLT": true, "NLD": true, "PRT": true, "SVK": true,
-	"SVN": true,
+	"AT": true, "BE": true, "BG": true, "CY": true, "DE": true,
+	"EE": true, "ES": true, "FI": true, "FR": true, "GR": true,
+	"HR": true, "IE": true, "IT": true, "LT": true, "LU": true,
+	"LV": true, "MT": true, "NL": true, "PT": true, "SK": true,
+	"SI": true,
 }
 
 // --- Location ---
 
-// indexCountry converts an ISO 3166 alpha-2 or alpha-3 country code to the
-// code the Big Mac index uses for it, mapping euro area members to EUZ.
-func indexCountry(code string) (string, error) {
+// normalizeCountry converts an ISO 3166 alpha-2 or alpha-3 country code to
+// the alpha-2 code the price file is keyed by. EUZ stands for the euro area.
+func normalizeCountry(code string) (string, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if code == euroAreaCode {
 		return code, nil
@@ -47,15 +59,11 @@ func indexCountry(code string) (string, error) {
 	if err != nil || !region.IsCountry() {
 		return "", fmt.Errorf("unknown country code %q", code)
 	}
-	iso3 := region.ISO3()
-	if euroArea[iso3] {
-		return euroAreaCode, nil
-	}
-	return iso3, nil
+	return region.String(), nil
 }
 
-// detectCountry geolocates this machine's public IP and returns its Big Mac
-// index country code.
+// detectCountry geolocates this machine's public IP and returns its country
+// code.
 func detectCountry(geoURL string) (string, error) {
 	resp, err := httpClient.Get(geoURL)
 	if err != nil {
@@ -74,28 +82,107 @@ func detectCountry(geoURL string) (string, error) {
 	if r.Country == "" {
 		return "", fmt.Errorf("geolocation: no country in response")
 	}
-	return indexCountry(r.Country)
+	return normalizeCountry(r.Country)
 }
 
 // --- Big Mac price ---
 
-// bigMacPrice is the price of one Big Mac in the local currency of the
-// country it was observed in. No currency is privileged: a Swiss feeder
-// prices it in CHF, a Japanese one in JPY.
+// bigMacPrice is the pick-up price of one Big Mac in the local currency of
+// the country it was observed in: the burger on its own, as the restaurant
+// sells it at the counter, the kiosk or in the McDonald's app. No currency is
+// privileged: a Swiss feeder prices it in CHF, a Japanese one in JPY.
 type bigMacPrice struct {
-	Name     string  // country name as in the index, e.g. "Euro area"
-	Price    float64 // local price, in Currency
+	Name     string  // where the price is from: a country code, or "--bigmac-price"
+	Price    float64 // the median of the prices observed, in Currency
+	Low      float64 // lowest price observed; 0 for a price given with --bigmac-price
+	High     float64 // highest price observed; 0 for a price given with --bigmac-price
 	Currency string  // ISO 4217 code, e.g. "CHF"
-	Date     string  // survey date, or "" for a price given with --bigmac-price
+	Date     string  // date of the observation, or "" for a price given with --bigmac-price
 }
 
 func (b bigMacPrice) String() string {
 	return strconv.FormatFloat(b.Price, 'f', -1, 64) + " " + b.Currency
 }
 
-// fetchBigMacPrices returns the local Big Mac prices from the latest survey
-// in the index, keyed by country code. Countries dropped from the survey are
-// left out.
+// priceColumns are the columns the feed reads from the price file. The file
+// also has a "sources" column, which is for people.
+var priceColumns = []string{"country_code", "currency_code", "low", "high", "median", "date"}
+
+// parseBigMacPrices reads a price file (see latest.csv) and returns its rows
+// keyed by country code. A row that cannot be used (unknown country, bad
+// currency, a price that is not positive, low > median or median > high, a
+// date that is not YYYY-MM-DD) is left out, and so is a second row for the
+// same country.
+func parseBigMacPrices(r io.Reader) (map[string]bigMacPrice, error) {
+	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1
+	header, err := reader.Read()
+	if err != nil {
+		return nil, fmt.Errorf("price file: %w", err)
+	}
+	col := make(map[string]int)
+	for i, h := range header {
+		col[strings.TrimSpace(strings.TrimPrefix(h, "\ufeff"))] = i
+	}
+	width := 0
+	for _, required := range priceColumns {
+		i, ok := col[required]
+		if !ok {
+			return nil, fmt.Errorf("price file: missing column %q", required)
+		}
+		if i >= width {
+			width = i + 1
+		}
+	}
+
+	prices := make(map[string]bigMacPrice)
+	for {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("price file: %w", err)
+		}
+		if len(row) < width {
+			continue
+		}
+		country, err := normalizeCountry(row[col["country_code"]])
+		if err != nil || country == euroAreaCode {
+			continue
+		}
+		if _, seen := prices[country]; seen {
+			continue
+		}
+		currency := strings.ToUpper(strings.TrimSpace(row[col["currency_code"]]))
+		low, high, median := parsePrice(row[col["low"]]), parsePrice(row[col["high"]]), parsePrice(row[col["median"]])
+		date := strings.TrimSpace(row[col["date"]])
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			continue
+		}
+		if !isCurrencyCode(currency) || !(low > 0) || low > median || median > high || math.IsInf(high, 0) {
+			continue
+		}
+		prices[country] = bigMacPrice{Name: country, Price: median, Low: low, High: high, Currency: currency, Date: date}
+	}
+
+	if len(prices) == 0 {
+		return nil, fmt.Errorf("price file: no usable row")
+	}
+	return prices, nil
+}
+
+// parsePrice returns NaN for anything that is not a number, so that every
+// comparison with it fails.
+func parsePrice(s string) float64 {
+	p, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return p
+}
+
+// fetchBigMacPrices downloads and reads the price file at csvURL.
 func fetchBigMacPrices(csvURL string) (map[string]bigMacPrice, error) {
 	resp, err := httpClient.Get(csvURL)
 	if err != nil {
@@ -103,74 +190,84 @@ func fetchBigMacPrices(csvURL string) (map[string]bigMacPrice, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("big mac index: HTTP %s", resp.Status)
+		return nil, fmt.Errorf("price file: HTTP %s", resp.Status)
 	}
-
-	reader := csv.NewReader(resp.Body)
-	header, err := reader.Read()
-	if err != nil {
-		return nil, err
-	}
-
-	col := make(map[string]int)
-	for i, h := range header {
-		col[strings.TrimSpace(h)] = i
-	}
-	for _, required := range []string{"date", "iso_a3", "name", "currency_code", "local_price"} {
-		if _, ok := col[required]; !ok {
-			return nil, fmt.Errorf("missing column %q", required)
-		}
-	}
-
-	var latest string
-	prices := make(map[string]bigMacPrice)
-
-	for {
-		row, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		date := row[col["date"]]
-		if date < latest {
-			continue
-		}
-		p, err := strconv.ParseFloat(row[col["local_price"]], 64)
-		currency := strings.ToUpper(strings.TrimSpace(row[col["currency_code"]]))
-		if err != nil || !(p > 0) || math.IsInf(p, 0) || !isCurrencyCode(currency) {
-			continue
-		}
-		if date > latest {
-			latest = date
-			clear(prices)
-		}
-		prices[row[col["iso_a3"]]] = bigMacPrice{Name: row[col["name"]], Price: p, Currency: currency, Date: date}
-	}
-
-	if len(prices) == 0 {
-		return nil, fmt.Errorf("no Big Mac prices found in CSV")
-	}
-	return prices, nil
+	return parseBigMacPrices(resp.Body)
 }
 
-// pickBigMacPrice returns the price for country. If country is not in the
-// latest survey, it returns the US price when fallbackToUS is set and an
-// error otherwise.
-func pickBigMacPrice(prices map[string]bigMacPrice, country string, fallbackToUS bool) (bigMacPrice, error) {
+// priceSource hands out the price file: the published one when it can be
+// fetched, else the last copy that was, else the copy built into the binary.
+// A price changes a few times a year, so an older copy is still the best
+// there is while the published file is out of reach.
+type priceSource struct {
+	url  string // empty: use the built-in copy only
+	last map[string]bigMacPrice
+}
+
+// prices returns the rows and, when they are not fresh from url, where they
+// are from.
+func (s *priceSource) prices() (rows map[string]bigMacPrice, origin string, err error) {
+	if s.url != "" {
+		rows, err := fetchBigMacPrices(s.url)
+		if err == nil {
+			s.last = rows
+			return rows, "", nil
+		}
+		log.Printf("WARNING: price file %s unavailable: %v", s.url, err)
+		if s.last != nil {
+			return s.last, "last copy fetched", nil
+		}
+	}
+	rows, err = parseBigMacPrices(bytes.NewReader(embeddedPrices))
+	if err != nil {
+		return nil, "", fmt.Errorf("built-in price file: %w", err)
+	}
+	return rows, "copy built into this version", nil
+}
+
+// pickBigMacPrice returns the price for country. There is no stand-in for a
+// country that has no row: another country's Big Mac is another price, so
+// the round fails and the witness is told how to state its own.
+func pickBigMacPrice(prices map[string]bigMacPrice, country string) (bigMacPrice, error) {
 	if p, ok := prices[country]; ok {
 		return p, nil
 	}
-	if !fallbackToUS {
-		return bigMacPrice{}, fmt.Errorf("%s is not in the latest Big Mac survey", country)
+	if country == euroAreaCode {
+		return euroAreaPrice(prices)
 	}
-	p, ok := prices[usCode]
-	if !ok {
-		return bigMacPrice{}, fmt.Errorf("US Big Mac price not found in CSV")
+	return bigMacPrice{}, fmt.Errorf("no pick-up price for %s in the price file yet: state the price you pay with --bigmac-price (e.g. --bigmac-price=\"7.30 CHF\") and report it so it can be added, see the README", country)
+}
+
+// euroAreaPrice is the median of the euro area countries that have a row,
+// for a witness that asks for the euro area as a whole with --country=EUZ.
+func euroAreaPrice(prices map[string]bigMacPrice) (bigMacPrice, error) {
+	var codes []string
+	for code, p := range prices {
+		if euroArea[code] && p.Currency == "EUR" {
+			codes = append(codes, code)
+		}
 	}
-	log.Printf("%s is not in the latest Big Mac survey, using the US price", country)
-	return p, nil
+	if len(codes) == 0 {
+		return bigMacPrice{}, fmt.Errorf("no euro area country in the price file")
+	}
+	sort.Strings(codes)
+	medians := make([]float64, len(codes))
+	out := bigMacPrice{Currency: "EUR", Name: "the euro area (median of " + strings.Join(codes, ", ") + ")"}
+	for i, code := range codes {
+		p := prices[code]
+		medians[i] = p.Price
+		if out.Low == 0 || p.Low < out.Low {
+			out.Low = p.Low
+		}
+		if p.High > out.High {
+			out.High = p.High
+		}
+		if out.Date == "" || p.Date < out.Date {
+			out.Date = p.Date // the oldest observation, so the log does not overstate freshness
+		}
+	}
+	out.Price = median(medians)
+	return out, nil
 }
 
 // --- Big Mac price given by the witness ---

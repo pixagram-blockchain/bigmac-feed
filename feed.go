@@ -74,7 +74,7 @@ func (r *feedResult) quoteAsset() (asset, error) {
 func (r *feedResult) summary() string {
 	var b strings.Builder
 	if r.BigMac.Date != "" {
-		fmt.Fprintf(&b, "Big Mac in %s = %s (as of %s)", r.BigMac.Name, r.BigMac, r.BigMac.Date)
+		fmt.Fprintf(&b, "Big Mac in %s = %s (pick-up price as of %s)", r.BigMac.Name, r.BigMac, r.BigMac.Date)
 	} else {
 		fmt.Fprintf(&b, "Big Mac = %s (%s)", r.BigMac, r.BigMac.Name)
 	}

@@ -10,9 +10,53 @@ The feed values 1 PXS at the price of one Big Mac in the country the feeder runs
 
 ## Currency agnostic
 
-No currency is privileged. The Big Mac is priced in the **local currency** of its country (7.30 CHF in Switzerland, 500 JPY in Japan, 6.22 USD in the US), and PIXA is valued on **any market**, in whatever currency that market quotes it (USDT on Coinstore today). When the two currencies differ, the PIXA fair value is converted into the Big Mac's currency at today's rate. N is a pure ratio of a Big Mac to PIXA: routing it through USD, CHF or EUR gives the same result. The chain's median across witnesses then aims PXS at a world-median Big Mac.
+No currency is privileged. The Big Mac is priced in the **local currency** of its country (6.99 EUR in Germany, 500 JPY in Japan, 5,700 KRW in South Korea), and PIXA is valued on **any market**, in whatever currency that market quotes it (USDT on Coinstore today). When the two currencies differ, the PIXA fair value is converted into the Big Mac's currency at today's rate. N is a pure ratio of a Big Mac to PIXA: routing it through USD, CHF or EUR gives the same result. The chain's median across witnesses then aims PXS at a world-median Big Mac.
 
 Stablecoins count as the fiat they track (USDT, USDC, FDUSD, DAI… → USD; EURC, EURT → EUR; XCHF, ZCHF → CHF). FX rates come from the ECB reference rates via [Frankfurter](https://frankfurter.dev) (about 30 currencies) and, for the other Big Mac currencies (ARS, EGP, VND, PKR, UAH…), from [ExchangeRate-API](https://www.exchangerate-api.com) ([Rates By Exchange Rate API](https://www.exchangerate-api.com)). Neither needs a key. The last good rate is reused for up to `--fx-max-age` if both are down.
+
+## Price data
+
+The Big Mac prices are Pixa's own file, kept in this repository. Until v1.3.0 the feed read The Economist's Big Mac index directly. Now a country nobody has read yet starts from The Economist's latest edition, sourced as such, and a reading in the McDonald's app replaces it.
+
+| File | Holds | Read by |
+|---|---|---|
+| [`latest.csv`](latest.csv) | The **pick-up price**: what the restaurant itself charges at the counter, at the kiosk or in the McDonald's app | the feed, and [pixa.org](https://pixa.org/bigmac.html) |
+| [`delivery.csv`](delivery.csv) | The **delivery price**: what delivery apps such as Uber Eats list, before their fees | pixa.org only, for comparison |
+
+The two are different prices. A delivery app has its own price list for the same restaurant, usually higher: in Germany the usual pick-up price is 6.99 EUR while Uber Eats lists 7.69 EUR in Berlin. The feed uses the pick-up price only.
+
+Both files have the same columns:
+
+| Column | Meaning |
+|---|---|
+| `country_code` | ISO 3166-1 alpha-2 code. One row per country, in alphabetical order |
+| `currency_code` | ISO 4217 code of the currency the prices are in, the country's own |
+| `low`, `high` | The lowest and the highest price observed |
+| `median` | The median of the prices observed. This is the price the feed uses |
+| `date` | The day the prices were observed, `YYYY-MM-DD`; for a row that combines several days, the latest. For `delivery.csv`, the day the page was read: a page read through a search engine can be an older copy |
+| `sources` | Where each price was read, separated by ` \| ` |
+
+The rules:
+
+- **The burger on its own**, never the menu or meal. In France that is the Big Mac under "Nos produits à l'unité".
+- **The price a customer pays**, taxes included where the country shows prices that way.
+- **A source someone else can check**: McDonald's own price list or announcement, a count of restaurant prices that says how it was made, a press report of a restaurant price, a price a witness read in the McDonald's app or at the counter, with the place and the day, or, for a country nobody has read yet, The Economist's latest Big Mac index.
+- **No row without a source.** A country nobody has a pick-up price for is left out, and no other country's price stands in for it.
+
+`go test ./...` checks both files against these rules.
+
+Rows sourced to The Economist use data from [TheEconomist/big-mac-data](https://github.com/TheEconomist/big-mac-data), © The Economist, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Only the local price and the edition date are taken; the euro area members come from its per-country source data, since its index has one row for the whole euro area. India is left out: the Big Mac is not sold there, and The Economist uses another burger.
+
+### Reporting a price
+
+Read the price of a Big Mac on its own at your restaurant: in the McDonald's app, choose the restaurant and open the Big Mac; or read the menu board. In Switzerland the app shows prices without an account. Several restaurants make a better row than one: `low` and `high` are the extremes, `median` the middle.
+
+Then either:
+
+- [open a price report](https://github.com/pixagram-blockchain/bigmac-feed/issues/new?template=price.yml): a short form for the country, the restaurants, the prices and the day; or
+- open a pull request that adds or updates your country's row in `latest.csv`, with the restaurant, the day and the price in `sources`, and run `go test ./...`.
+
+Until your country has a row, state your price to the feed yourself with `--bigmac-price`.
 
 ## Fair value, not the last trade
 
@@ -28,16 +72,17 @@ If no market gives a fair value, nothing is published for that round, and the ch
 
 ## What it does
 
-On startup the feeder picks the Big Mac:
+The feeder picks the Big Mac:
 
 1. `--bigmac-price`, if set (a price you observe yourself, e.g. `"7.30 CHF"`);
-2. otherwise `--country`, if set;
-3. otherwise the country of the server's public IP, looked up once via [ipinfo.io](https://ipinfo.io);
-4. otherwise, if that lookup fails, the United States.
+2. otherwise the row of `--country`, if set;
+3. otherwise the row of the country of the server's public IP, looked up via [ipinfo.io](https://ipinfo.io).
+
+No country stands in for another. If the country has no row in `latest.csv`, or the server's country cannot be told, the round fails with a message saying so, nothing is published, and the chain keeps the witness's previous feed. `--country=EUZ` asks for the euro area as a whole: the median of the euro area countries that have a row.
 
 Then every hour it:
 
-1. reads that country's local Big Mac price and currency from the latest survey of The Economist's [Big Mac index](https://www.economist.com/big-mac-index). Euro area countries use the `Euro area` price in EUR. A detected country that is not in the latest survey uses the US price; a `--country` that is not in it fails the round;
+1. reads that country's pick-up price and currency from [`latest.csv`](latest.csv) on the `main` branch of this repository. If the file cannot be fetched, the feed uses the last copy it fetched, and before any fetch succeeded, the copy built into the binary;
 2. reads the PIXA fair value from each market (`coinstore:PIXAUSDT` by default);
 3. converts it into the Big Mac's currency if needed;
 4. publishes `1.000 PXS = <Big Mac price / PIXA fair value> PIXA` for each witness.
@@ -45,7 +90,7 @@ Then every hour it:
 Every round logs the full derivation, for example:
 
 ```
-Big Mac in Switzerland = 7.3 CHF (as of 2026-07-01) | PIXA = 0.145 USDT [coinstore PIXAUSDT: bid 0.1339 / ask 0.145, 1000-PIXA impact 0.1339 / 0.551543] = 0.120143 CHF | FX USD→CHF 0.82857 (ECB 2026-10-29) → 1 PXS = 60.761 PIXA
+Big Mac in DE = 6.99 EUR (pick-up price as of 2026-10-24) | PIXA = 0.145 USDT [coinstore PIXAUSDT: bid 0.1339 / ask 0.145, 1000-PIXA impact 0.1339 / 0.551543] = 0.131914 EUR | FX USD→EUR 0.90975 (ECB 2026-11-19) → 1 PXS = 52.989 PIXA
 ```
 
 Every network request times out after 60 s. A failed round is logged and retried at the next interval.
@@ -55,17 +100,19 @@ Every network request times out after 60 s. A failed round is logged and retried
 ```bash
 docker run -d --name bigmac-feed --restart unless-stopped \
   -e WITNESS_WIF=<active key> \
-  pixadock/bigmac-feed:v1.3.0 \
+  pixarex/bigmac-feed:v1.4.0 \
   --witness=<witness name>
 ```
 
-Add `--country=CH` (or any other country code) to use a fixed country instead of the detected one, or `--bigmac-price="7.80 CHF"` to use the price you pay.
+Add `--country=DE` (or any other country code) to use a fixed country instead of the detected one, or `--bigmac-price="7.80 CHF"` to use the price you pay.
 
 To see what would be published without broadcasting (no key needed):
 
 ```bash
-docker run --rm pixadock/bigmac-feed:v1.3.0 --dry-run --once --witness=<witness name>
+docker run --rm pixarex/bigmac-feed:v1.4.0 --dry-run --once --witness=<witness name>
 ```
+
+Run this before switching from v1.3.0: if your country has no row yet, the output says so, and you need `--bigmac-price`.
 
 ## Options
 
@@ -75,9 +122,9 @@ docker run --rm pixadock/bigmac-feed:v1.3.0 --dry-run --once --witness=<witness 
 | `--wif` | `WITNESS_WIF` env | Active key(s), in the same order as `--witness` |
 | `--rpc` | `https://api.pixagram.com` | Node to broadcast through |
 | `--chain-id` | read from `--rpc` | Chain ID in hex |
-| `--country` | detected from IP | Country whose Big Mac price to use: ISO 3166 code (`CN`, `CHN`), or `EUZ` for the euro area |
-| `--bigmac-price` | | Big Mac price with its currency, e.g. `"7.30 CHF"`; overrides `--country` |
-| `--bigmac-url` | The Economist's July 2026 CSV | Big Mac index CSV |
+| `--country` | detected from IP | Country whose Big Mac price to use: ISO 3166 code (`CN`, `CHN`), or `EUZ` for the median of the euro area countries in the price file |
+| `--bigmac-price` | | Pick-up price of a Big Mac with its currency, e.g. `"7.30 CHF"`; overrides `--country` and the price file |
+| `--bigmac-url` | `latest.csv` on this repository's `main` | Price file; empty uses only the copy built into the binary |
 | `--pair` | `coinstore:PIXAUSDT` | PIXA market(s), repeatable or comma-separated: `coinstore:SYMBOL`, or `coinstore:SYMBOL:QUOTE` when the quote currency cannot be read from the symbol |
 | `--impact-size` | `1000` | Order size in PIXA used to read the fair value; `0` = mid of the best bid and ask |
 | `--max-spread` | `0.25` | Widest spread, relative to the mid, at which a book has a fair value; `0` disables |
@@ -89,6 +136,14 @@ docker run --rm pixadock/bigmac-feed:v1.3.0 --dry-run --once --witness=<witness 
 | `--interval` | `1h` | How often to publish |
 | `--once` | `false` | Publish once and exit |
 | `--dry-run` | `false` | Compute and log the feed without broadcasting; no key needed |
+
+## Changes in v1.4.0
+
+- The Big Mac price comes from Pixa's own file, `latest.csv`, not from The Economist's index. It holds the pick-up price per country; delivery-app prices are kept apart in `delivery.csv` and are not used by the feed. Countries nobody has read yet start from The Economist's July 2026 edition.
+- Every euro area country has its own row. `--country=EUZ` still works and gives the median of the euro area rows.
+- A country without a row no longer falls back to the US price, and a server whose country cannot be detected no longer counts as being in the US. The round fails instead, and the message says to set `--bigmac-price` or `--country`.
+- If `latest.csv` cannot be fetched, the feed keeps publishing from the last copy it fetched, or from the copy built into the binary.
+- `--bigmac-url` now points at a price file in the format above. A URL of The Economist's CSV is rejected.
 
 ## Changes in v1.3.0
 
@@ -105,4 +160,6 @@ docker build -t bigmac-feed .
 go test ./...
 ```
 
-`chain.go` holds the transaction building, signing and broadcast; `bigmac.go` the Big Mac price; `market.go` the order book and fair value; `fx.go` the currency conversion; `feed.go` the ratio; `main.go` wires them.
+`latest.csv` is built into the binary, so a new price reaches witnesses in two ways: at once through the published file, and with the next release as the built-in copy.
+
+`chain.go` holds the transaction building, signing and broadcast; `bigmac.go` the price file and the Big Mac price; `market.go` the order book and fair value; `fx.go` the currency conversion; `feed.go` the ratio; `main.go` wires them.

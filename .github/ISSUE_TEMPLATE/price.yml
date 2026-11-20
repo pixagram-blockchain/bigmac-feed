@@ -1,0 +1,58 @@
+name: Report a Big Mac price
+description: Add or update the pick-up price of a Big Mac in your country
+title: "Price: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report the price of a Big Mac **on its own** (never the menu or meal) as the restaurant itself sells it: in the McDonald's app with a restaurant selected, at the kiosk or at the counter.
+        Not the price in a delivery app such as Uber Eats: that is a different, higher price list.
+        Several restaurants make a better row than one.
+  - type: input
+    id: country
+    attributes:
+      label: Country
+      description: The country's name or its two-letter code
+      placeholder: "Switzerland (CH)"
+    validations:
+      required: true
+  - type: input
+    id: currency
+    attributes:
+      label: Currency
+      description: The currency the prices are shown in
+      placeholder: "CHF"
+    validations:
+      required: true
+  - type: textarea
+    id: readings
+    attributes:
+      label: Restaurants and prices
+      description: One line per restaurant, with its name or address and the price you read
+      placeholder: |
+        First restaurant, street and town: 7.50
+        Second restaurant, street and town: 7.60
+    validations:
+      required: true
+  - type: input
+    id: date
+    attributes:
+      label: Day you read them
+      placeholder: "2026-11-19"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where you read them
+      options:
+        - McDonald's app
+        - Kiosk or menu board
+        - Counter or receipt
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Screenshot or photo
+      description: Optional. Drag an image here. It lets someone else check the row.
