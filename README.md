@@ -16,7 +16,7 @@ Stablecoins count as the fiat they track (USDT, USDC, FDUSD, DAI… → USD; EUR
 
 ## Price data
 
-The Big Mac prices are Pixa's own, kept in this repository. Until v1.3.0 the feed read The Economist's Big Mac index.
+The Big Mac prices are Pixa's own file, kept in this repository. Until v1.3.0 the feed read The Economist's Big Mac index directly. Now a country nobody has read yet starts from The Economist's latest edition, sourced as such, and a reading in the McDonald's app replaces it.
 
 | File | Holds | Read by |
 |---|---|---|
@@ -40,10 +40,12 @@ The rules:
 
 - **The burger on its own**, never the menu or meal. In France that is the Big Mac under "Nos produits à l'unité".
 - **The price a customer pays**, taxes included where the country shows prices that way.
-- **A source someone else can check**: McDonald's own price list or announcement, a count of restaurant prices that says how it was made, a press report of a restaurant price, or a price a witness read in the McDonald's app or at the counter, with the place and the day.
+- **A source someone else can check**: McDonald's own price list or announcement, a count of restaurant prices that says how it was made, a press report of a restaurant price, a price a witness read in the McDonald's app or at the counter, with the place and the day, or, for a country nobody has read yet, The Economist's latest Big Mac index.
 - **No row without a source.** A country nobody has a pick-up price for is left out, and no other country's price stands in for it.
 
 `go test ./...` checks both files against these rules.
+
+Rows sourced to The Economist use data from [TheEconomist/big-mac-data](https://github.com/TheEconomist/big-mac-data), © The Economist, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Only the local price and the edition date are taken; the euro area members come from its per-country source data, since its index has one row for the whole euro area. India is left out: the Big Mac is not sold there, and The Economist uses another burger.
 
 ### Reporting a price
 
@@ -137,7 +139,7 @@ Run this before switching from v1.3.0: if your country has no row yet, the outpu
 
 ## Changes in v1.4.0
 
-- The Big Mac price comes from Pixa's own file, `latest.csv`, not from The Economist's index. It holds the pick-up price per country; delivery-app prices are kept apart in `delivery.csv` and are not used by the feed.
+- The Big Mac price comes from Pixa's own file, `latest.csv`, not from The Economist's index. It holds the pick-up price per country; delivery-app prices are kept apart in `delivery.csv` and are not used by the feed. Countries nobody has read yet start from The Economist's July 2026 edition.
 - Every euro area country has its own row. `--country=EUZ` still works and gives the median of the euro area rows.
 - A country without a row no longer falls back to the US price, and a server whose country cannot be detected no longer counts as being in the US. The round fails instead, and the message says to set `--bigmac-price` or `--country`.
 - If `latest.csv` cannot be fetched, the feed keeps publishing from the last copy it fetched, or from the copy built into the binary.

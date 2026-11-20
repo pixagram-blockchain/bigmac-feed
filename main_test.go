@@ -446,7 +446,7 @@ func checkPriceFile(data []byte) []string {
 			problems = append(problems, fmt.Sprintf("line %d: %s must come after %s, one row per country in alphabetical order", line, country, previous))
 		}
 		previous = country
-		if unit, err := currency.ParseISO(currencyCode); err != nil || unit.String() != currencyCode {
+		if !isISOCurrency(currencyCode) {
 			problems = append(problems, fmt.Sprintf("line %d: currency_code %q is not an ISO 4217 code", line, currencyCode))
 		}
 		low, high, median := parsePrice(row[2]), parsePrice(row[3]), parsePrice(row[4])
@@ -467,6 +467,18 @@ func checkPriceFile(data []byte) []string {
 		problems = append(problems, fmt.Sprintf("the feed reads %d of the %d rows (%v)", len(parsed), len(rows)-1, err))
 	}
 	return problems
+}
+
+// newerISOCurrencies are current ISO 4217 codes that golang.org/x/text's
+// table does not have yet, such as Venezuela's VES.
+var newerISOCurrencies = map[string]bool{"MRU": true, "SLE": true, "VED": true, "VES": true, "ZWG": true}
+
+func isISOCurrency(code string) bool {
+	if newerISOCurrencies[code] {
+		return true
+	}
+	unit, err := currency.ParseISO(code)
+	return err == nil && unit.String() == code
 }
 
 func TestPriceFilesFollowTheRules(t *testing.T) {
